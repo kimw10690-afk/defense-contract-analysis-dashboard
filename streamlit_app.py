@@ -10,7 +10,7 @@ from datetime import date
 #######################
 # Page configuration
 st.set_page_config(
-    page_title="US Population Dashboard",
+    page_title="DAPA Contract Analysis",
     page_icon="🏂",
     layout="wide",
     initial_sidebar_state="expanded")
