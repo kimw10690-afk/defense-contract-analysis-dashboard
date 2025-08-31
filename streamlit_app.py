@@ -16,6 +16,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded")
 alt.themes.enable("default")
+# Altair embed 옵션: 도구메뉴만 숨김(tooltip은 CSS로 완전 차단)
+try:
+    alt.renderers.set_embed_options(actions=False)
+except Exception:
+    pass
 
 #######################
 # CSS styling
@@ -48,6 +53,9 @@ st.markdown("""
     display:inline-block; background:#f6f6f6; border:1px solid #eaeaea;
     border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:0.9rem;
 }
+
+/* ✅ Vega tooltip 완전 차단(마우스 따라오는 풍선 제거) */
+.vega-tooltip, #vg-tooltip-element { display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,10 +79,7 @@ def get_slider_bounds(series: pd.Series, *, round_digits: int = 1,
     return mn, mx, disabled
 
 def fmt_total_amount_str(total_jo: float) -> str:
-    """
-    총액 표기: 0.1 조원 미만이면 억원으로, 아니면 조원으로.
-    - 입력은 '조원' 단위 합계(total_jo)
-    """
+    """총액 표기: 0.1 조원 미만이면 억원, 아니면 조원"""
     try:
         val = float(total_jo)
     except Exception:
@@ -109,27 +114,22 @@ df_reshaped["계약금액_조원"] = df_reshaped["계약금액"] / 1e12
 df_reshaped["_p_start"] = pd.NaT
 df_reshaped["_p_end"] = pd.NaT
 
-# 1) "계약기간" 문자열 안에 "시작 ~ 종료"
 if "계약기간" in df_reshaped.columns:
     parts = df_reshaped["계약기간"].astype(str).str.split("~")
     df_reshaped["_p_start"] = pd.to_datetime(parts.str[0].str.strip(), errors="coerce")
     df_reshaped["_p_end"]   = pd.to_datetime(parts.str[1].str.strip(), errors="coerce")
 
-# 2) 별도 시작/종료 컬럼 보정
 for c_from, c_to in [("계약기간시작일자","_p_start"), ("계약기간종료일자","_p_end")]:
     if c_from in df_reshaped.columns:
         df_reshaped[c_to] = pd.to_datetime(df_reshaped[c_from], errors="coerce")
 
-# 기간(일수)
 mask = df_reshaped[["_p_start","_p_end"]].notna().all(axis=1)
 df_reshaped["_p_days"] = pd.NA
 df_reshaped.loc[mask, "_p_days"] = (df_reshaped.loc[mask, "_p_end"] - df_reshaped.loc[mask, "_p_start"]).dt.days + 1
 
-# 기간 구분(단년/다년(n년))
 df_reshaped["기간구분"] = "기간정보없음"
 days = pd.to_numeric(df_reshaped["_p_days"], errors="coerce")
 ny = np.ceil(days / 365.0)
-
 df_reshaped.loc[days.notna() & (days <= 365), "기간구분"] = "단년(≤1년)"
 multi_years = ny[days > 365].astype("Int64").astype(str)
 df_reshaped.loc[days > 365, "기간구분"] = "다년(" + multi_years + "년)"
@@ -142,7 +142,6 @@ with st.sidebar:
 
     df = df_reshaped.copy()
 
-    # ------------ 필터 UI ------------
     years = sorted([int(y) for y in df["_year"].dropna().unique()]) if df["_year"].notna().any() else []
     year_sel = st.selectbox("연도 선택 (Δ는 연도 선택 시 표시)", options=["전체"] + years, index=0)
 
@@ -152,33 +151,23 @@ with st.sidebar:
     method_options = sorted([x for x in df.get("계약체결방법명", pd.Series(dtype=str)).dropna().unique()])
     method_sel = st.multiselect("계약방법 선택", options=method_options, default=[])
 
-    # 💰 금액 슬라이더: 억원 (안전 처리)
     amt_min, amt_max, amt_disabled = get_slider_bounds(df["계약금액_억원"], round_digits=1, floor_zero=True, step=0.1)
-    amt_range = st.slider(
-        "계약금액 범위 (억원)",
-        min_value=float(amt_min),
-        max_value=float(amt_max),
-        value=(float(amt_min), float(amt_max)),
-        step=0.1,
-        disabled=amt_disabled,
-    )
+    amt_range = st.slider("계약금액 범위 (억원)",
+        min_value=float(amt_min), max_value=float(amt_max),
+        value=(float(amt_min), float(amt_max)), step=0.1, disabled=amt_disabled)
 
     st.markdown("---")
 
-    # ------------ 키워드 검색 ------------
     keyword = st.text_input("🔎 키워드 검색", placeholder="계약명, 수요기관명, 대표업체명, 주소 등")
     match_mode = st.radio("일치 방식", ["AND (모두 포함)", "OR (하나라도 포함)"], horizontal=True)
 
     search_cols = [c for c in ["계약명", "수요기관명", "대표업체명", "대표업체주소", "업무구분명", "계약체결방법명"] if c in df.columns]
     if search_cols:
         if "search_text" not in df.columns:
-            df["search_text"] = (
-                df[search_cols].astype(str).fillna("").agg(" ".join, axis=1).str.lower()
-            )
+            df["search_text"] = df[search_cols].astype(str).fillna("").agg(" ".join, axis=1).str.lower()
     else:
         df["search_text"] = ""
 
-    # ------------ 필터 적용 ------------
     filtered = df.copy()
     if year_sel != "전체":
         filtered = filtered[filtered["_year"] == int(year_sel)]
@@ -202,7 +191,6 @@ with st.sidebar:
     filtered = filtered.drop(columns=["search_text"], errors="ignore")
     st.session_state["filtered_df"] = filtered
 
-    # Δ 계산(연도 선택 시)
     prev_year_sum_jo = None
     if year_sel != "전체":
         y = int(year_sel)
@@ -216,10 +204,7 @@ with st.sidebar:
             prev_df = prev_df[(prev_df["계약금액_억원"] >= amt_range[0]) & (prev_df["계약금액_억원"] <= amt_range[1])]
         if keyword.strip():
             if "search_text" not in prev_df.columns:
-                prev_df["search_text"] = (
-                    prev_df[search_cols].astype(str).fillna("").agg(" ".join, axis=1).str.lower()
-                    if search_cols else ""
-                )
+                prev_df["search_text"] = prev_df[search_cols].astype(str).fillna("").agg(" ".join, axis=1).str.lower() if search_cols else ""
             tokens = [t for t in keyword.lower().split() if t]
             if tokens:
                 if match_mode.startswith("AND"):
@@ -231,7 +216,6 @@ with st.sidebar:
             prev_df = prev_df.drop(columns=["search_text"], errors="ignore")
         prev_year_sum_jo = float(prev_df["계약금액_조원"].sum()) if "계약금액_조원" in prev_df.columns else 0.0
 
-    # 사이드바 요약 배지 (총액 단위 자동 전환)
     if "_date" in filtered.columns and filtered["_date"].notna().any():
         start_dt = pd.to_datetime(filtered["_date"].min()).date()
         end_dt   = pd.to_datetime(filtered["_date"].max()).date()
@@ -255,7 +239,6 @@ with col[0]:
 
     data = st.session_state.get("filtered_df", df_reshaped).copy()
 
-    # 기간 배지
     if "_date" in data.columns and data["_date"].notna().any():
         start_dt = pd.to_datetime(data["_date"].min()).date()
         end_dt   = pd.to_datetime(data["_date"].max()).date()
@@ -263,7 +246,6 @@ with col[0]:
     else:
         st.markdown("<div class='period-badge'>기간: 데이터 없음</div>", unsafe_allow_html=True)
 
-    # KPI
     total_jo = data["계약금액_조원"].sum(skipna=True)
     avg_eok  = data["계약금액_억원"].mean(skipna=True)
     cnt      = len(data)
@@ -277,39 +259,30 @@ with col[0]:
         else:
             delta_str = "–"
 
-    # ✅ 총 계약 금액: 0.1조 미만이면 '억원', 아니면 '조원'
-    total_display = fmt_total_amount_str(float(total_jo))
-    st.metric("총 계약 금액", total_display, delta=delta_str if delta_str else None)
+    st.metric("총 계약 금액", fmt_total_amount_str(float(total_jo)), delta=delta_str if delta_str else None)
     st.metric("평균 계약 금액", f"{avg_eok:,.1f} 억원" if pd.notna(avg_eok) else "-")
     st.metric("계약 건수", f"{cnt:,} 건")
 
     if "대표업체명" in data.columns and not data.empty:
-        top_vendor_name = (
-            data.groupby("대표업체명")["계약금액_억원"].sum().sort_values(ascending=False).index[0]
-        )
+        top_vendor_name = (data.groupby("대표업체명")["계약금액_억원"].sum().sort_values(ascending=False).index[0])
         st.markdown(f"<div class='small-metric'>최대 계약 업체(총액기준)<br><b>{top_vendor_name}</b></div>", unsafe_allow_html=True)
 
 # =======================
-# 컬럼 1: 검색/필터 결과 테이블 + 계약방법 Breakdown + 히트맵 + 기간통계(간단)
+# 컬럼 1: 테이블 + Breakdown + 히트맵 + 기간통계
 # =======================
 with col[1]:
     st.markdown("### 🔎 검색/필터 결과 (테이블)")
     base = st.session_state.get("filtered_df", df_reshaped).copy()
 
-    # 미니필터 (안전 슬라이더 적용)
     with st.expander("테이블 추가 필터", expanded=False):
         q_name   = st.text_input("계약명 검색", placeholder="예: 디스플레이, 연구 용역 등")
         q_vendor = st.text_input("업체 검색", placeholder="예: ㈜○○, 유한회사 ○○ 등")
         q_org    = st.text_input("수요기관 검색", placeholder="예: 해군, 육군본부 등")
         eok_min, eok_max, eok_disabled = get_slider_bounds(base["계약금액_억원"], round_digits=1, floor_zero=True, step=0.1)
-        eok_range = st.slider(
-            "계약금액(억원) 범위(테이블)",
-            min_value=float(eok_min),
-            max_value=float(eok_max),
-            value=(float(eok_min), float(eok_max)),
-            step=0.1,
-            disabled=eok_disabled,
-        )
+        eok_range = st.slider("계약금액(억원) 범위(테이블)",
+                              min_value=float(eok_min), max_value=float(eok_max),
+                              value=(float(eok_min), float(eok_max)), step=0.1,
+                              disabled=eok_disabled)
 
     table_df = base.copy()
     if q_name.strip() and "계약명" in table_df.columns:
@@ -321,16 +294,12 @@ with col[1]:
     if table_df["계약금액_억원"].notna().any():
         table_df = table_df[(table_df["계약금액_억원"] >= eok_range[0]) & (table_df["계약금액_억원"] <= eok_range[1])]
 
-    # 금액 정렬 + 표시 건수
-    sort_dir = st.radio("금액 정렬", ["내림차순(높은→낮은)", "오름차순(낮은→높은)"],
-                        horizontal=True, index=0)
+    sort_dir = st.radio("금액 정렬", ["내림차순(높은→낮은)", "오름차순(낮은→높은)"], horizontal=True, index=0)
     rows_opt = [50, 100, 200, 500, 1000]
     rows_to_show = st.selectbox("표시 건수(금액 기준 상위 N건)", rows_opt, index=2)
 
     if "계약금액_억원" in table_df.columns:
-        table_df = table_df.sort_values(by="계약금액_억원",
-                                        ascending=(sort_dir.startswith("오름")),
-                                        na_position="last")
+        table_df = table_df.sort_values(by="계약금액_억원", ascending=(sort_dir.startswith("오름")), na_position="last")
 
     show_cols = [c for c in ["계약체결일자","계약명","계약금액_억원","대표업체명","수요기관명","업무구분명","계약체결방법명","계약기간"] if c in table_df.columns]
     if "계약금액_억원" in show_cols:
@@ -338,15 +307,9 @@ with col[1]:
     if show_cols:
         show_cols = [c if c!="계약금액_억원" else "계약금액(억원)" for c in show_cols]
         table_df_display = table_df[show_cols]
-        st.dataframe(
-            table_df_display.head(rows_to_show),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "계약체결일자": st.column_config.DatetimeColumn(format="YYYY-MM-DD"),
-                "계약금액(억원)": st.column_config.NumberColumn(format="%.1f"),
-            }
-        )
+        st.dataframe(table_df_display.head(rows_to_show), use_container_width=True, hide_index=True,
+                     column_config={"계약체결일자": st.column_config.DatetimeColumn(format="YYYY-MM-DD"),
+                                    "계약금액(억원)": st.column_config.NumberColumn(format="%.1f")})
         csv = table_df_display.to_csv(index=False).encode("utf-8-sig")
         st.download_button("⬇️ 현재 표 다운로드 (CSV)", data=csv, file_name="filtered_contracts.csv", mime="text/csv")
     else:
@@ -354,15 +317,12 @@ with col[1]:
 
     st.markdown("---")
 
-    # 📊 계약방법 Breakdown
     st.subheader("📊 계약방법 Breakdown (억원)")
     if "계약체결방법명" in base.columns and not base.empty:
         method_summary = base.groupby("계약체결방법명")["계약금액_억원"].sum().reset_index()
         if not method_summary.empty:
-            fig_method = px.pie(
-                method_summary, names="계약체결방법명", values="계약금액_억원",
-                title="계약방법별 계약금액 비율(억원)"
-            )
+            fig_method = px.pie(method_summary, names="계약체결방법명", values="계약금액_억원",
+                                title="계약방법별 계약금액 비율(억원)")
             st.plotly_chart(fig_method, use_container_width=True)
         else:
             st.info("표시할 계약방법 데이터가 없습니다.")
@@ -371,25 +331,44 @@ with col[1]:
 
     st.markdown("---")
 
-    # 🎛️ 히트맵 (라벨 포함)
-    st.subheader("📊 연도 × 계약방법 히트맵 (억원, 라벨)")
+    # 🎛️ 히트맵 (호버 시에만 타일 내 라벨 노출, tooltip 없음)
+    st.subheader("📊 연도 × 계약방법 히트맵 (억원)")
     if "계약체결방법명" in base.columns and "_year" in base.columns:
         pivot_df = base.groupby(["_year","계약체결방법명"])["계약금액_억원"].sum().reset_index()
+
         if not pivot_df.empty:
+            # 호버 선택: 마우스 올린 셀에만 값 보여주기
+            try:
+                hover = alt.selection_point(
+                    fields=["_year","계약체결방법명"],
+                    on="mouseover",
+                    nearest=True,
+                    empty=False
+                )
+            except Exception:
+                # (구버전 Altair 대비) 대체 selection
+                hover = alt.selection_single(
+                    fields=["_year","계약체결방법명"],
+                    on="mouseover",
+                    nearest=True,
+                    empty="none"
+                )
+
             base_chart = alt.Chart(pivot_df).encode(
                 x=alt.X("계약체결방법명:N", title="계약 방법"),
                 y=alt.Y("_year:O", title="연도"),
             )
+
             heat_rect = base_chart.mark_rect().encode(
-                color=alt.Color("계약금액_억원:Q", title="금액(억원)", scale=alt.Scale(scheme="blues")),
-                tooltip=[alt.Tooltip("_year:O", title="연도"),
-                         alt.Tooltip("계약체결방법명:N", title="방법"),
-                         alt.Tooltip("계약금액_억원:Q", title="금액(억원)", format=".1f")]
+                color=alt.Color("계약금액_억원:Q", title="금액(억원)", scale=alt.Scale(scheme="blues"))
             )
+
             heat_text = base_chart.mark_text(baseline="middle").encode(
                 text=alt.Text("계약금액_억원:Q", format=".1f"),
-                color=alt.value("#222")
-            )
+                opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+                color=alt.value("#FF7A00")
+            ).add_params(hover)
+
             st.altair_chart((heat_rect + heat_text).properties(width="container", height=360),
                             use_container_width=True)
         else:
@@ -403,24 +382,18 @@ with col[1]:
     st.subheader("⏱️ 계약기간 통계")
     period_base = base.copy()
     if "기간구분" in period_base.columns:
-        # 단년/다년 대분류
         cat = period_base["기간구분"].astype(str)
         big = np.where(cat.str.startswith("다년("), "다년", np.where(cat.eq("단년(≤1년)"), "단년", "기간정보없음"))
         period_base["기간대분류"] = big
 
-        # 단년/다년 계약건수 표
         order = ["단년", "다년", "기간정보없음"]
-        cnt_df = (period_base.groupby("기간대분류")
-                  .size().reindex(order).reset_index(name="계약건수").dropna())
+        cnt_df = (period_base.groupby("기간대분류").size().reindex(order).reset_index(name="계약건수").dropna())
         st.dataframe(cnt_df, use_container_width=True, hide_index=True)
 
-        # 최장기간 상위 N건 목록
         top_n = st.selectbox("📜 계약기간이 긴 상위 N건", [5, 10, 20, 50], index=1)
         dur_df = period_base.copy()
         dur_df["_p_days_num"] = pd.to_numeric(dur_df["_p_days"], errors="coerce")
-        long_df = (dur_df.dropna(subset=["_p_days_num"])
-                   .sort_values("_p_days_num", ascending=False)
-                   .head(top_n))
+        long_df = (dur_df.dropna(subset=["_p_days_num"]).sort_values("_p_days_num", ascending=False).head(top_n))
 
         if not long_df.empty:
             show_cols2 = []
@@ -437,7 +410,6 @@ with col[1]:
             if "계약금액_억원_round" in long_df.columns:
                 long_df = long_df.rename(columns={"계약금액_억원_round":"계약금액(억원)"})
                 show_cols2 += ["계약금액(억원)"]
-
             st.dataframe(long_df[show_cols2], use_container_width=True, hide_index=True)
         else:
             st.info("계약기간 정보를 가진 데이터가 없습니다.")
@@ -451,7 +423,6 @@ with col[2]:
     st.markdown("### 🏆 순위")
     data = st.session_state.get("filtered_df", df_reshaped).copy()
 
-    # Top 수요기관
     st.subheader("🏢 Top 수요기관 (억원)")
     if "수요기관명" in data.columns and not data.empty:
         top_org = (data.groupby("수요기관명")["계약금액_억원"].sum().reset_index()
@@ -467,7 +438,6 @@ with col[2]:
     else:
         st.info("수요기관명 데이터가 없습니다.")
 
-    # Top 업체 (금액)
     st.subheader("🏭 Top 업체 (금액 기준 상위 10)")
     if "대표업체명" in data.columns and not data.empty:
         top_vendor_amt = (data.groupby("대표업체명")["계약금액_억원"].sum().reset_index()
@@ -483,7 +453,6 @@ with col[2]:
     else:
         st.info("대표업체명 데이터가 없습니다.")
 
-    # 🔹 Top 업체 (건수)
     st.subheader("🏭 Top 업체 (건수 기준 상위 10)")
     if "대표업체명" in data.columns and not data.empty:
         top_vendor_cnt = (data.groupby("대표업체명").size()
